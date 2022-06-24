@@ -1,0 +1,12 @@
+[{<<"gb_merkle_trees">>,
+  {git,"https://github.com/KrzysiekJ/gb_merkle_trees.git",
+       {ref,"8ca2b71bcd87777eb10f25119a393ba7b4b3c219"}},
+  0},
+ {<<"jsx">>,
+  {git,"https://github.com/cleverfox/jsx.git",
+       {ref,"362f0b4aa9d982a33dcb3e7d8ced80ec755b64a1"}},
+  0},
+ {<<"msgpack">>,
+  {git,"https://github.com/cleverfox/msgpack-erlang",
+       {ref,"a0f026c803a66da925ae3cbb3198a1c5ca83162a"}},
+  0}].
