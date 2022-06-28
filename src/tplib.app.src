@@ -4,6 +4,9 @@
   {registered, []},
   {applications,
    [kernel,
+    jsx,
+    msgpack,
+    gb_merkle_trees,
     stdlib
    ]},
   {env,[]},
