@@ -584,10 +584,12 @@ verify(#{
         {true, _IAddr} when CI=={ok, From} ->
           %contract issued. Check nodes key.
           try
-            bsig:checksig(Body, LSigs,
-                          fun(PubKey,_) ->
-                              chainsettings:is_our_node(PubKey) =/= false
-                          end)
+            case lists:keyfind(nodekey_check,1,Opts) of
+              {nodekey_check, Fun} when is_function(Fun) ->
+                bsig:checksig(Body, LSigs, Fun);
+              false ->
+                throw(nodekey_check_required)
+            end
           catch _:_ ->
                   throw(verify_error)
           end;
@@ -876,32 +878,6 @@ rate2(#{body:=Body}, Cur, TxAmount, GetRateFun) ->
       tip => max(0, TxAmount - Cost)
     }}.
 
-%rate(#{ver:=2, kind:=deploy}=Tx, GetRateFun) ->
-%  try
-%    case get_payload(Tx, srcfee) of
-%      #{cur:=Cur, amount:=TxAmount} ->
-%        rate2(Tx, Cur, TxAmount, GetRateFun);
-%      _ ->
-%        case GetRateFun({params, <<"feeaddr">>}) of
-%          X when is_binary(X) ->
-%            {false, #{ cost=>null } };
-%          _ ->
-%            {true, #{ cost=>0, tip => 0, cur=><<"none">> }}
-%        end
-%    end
-%  catch Ec:Ee ->
-%          file:write_file("tmp/rate.txt", [io_lib:format("~p.~n~p.~n",
-%                                                         [
-%                                                          Tx,
-%                                                          erlang:term_to_binary(GetRateFun)
-%                                                         ])]),
-%          S=erlang:get_stacktrace(),
-%          lager:error("Calc fee error ~p tx ~p",[{Ec,Ee},Tx]),
-%          lists:foreach(fun(SE) ->
-%                            lager:error("@ ~p", [SE])
-%                        end, S),
-%          throw('cant_calculate_fee')
-%  end;
 
 rate(#{ver:=2, kind:=_}=Tx, GetRateFun) ->
   try
@@ -927,9 +903,9 @@ rate(#{ver:=2, kind:=_}=Tx, GetRateFun) ->
                                                           Tx,
                                                           element(2,erlang:fun_info(GetRateFun,env))
                                                          ])]),
-          lager:error("Calc fee error ~p tx ~p",[{Ec,Ee},Tx]),
+          logger:error("Calc fee error ~p tx ~p",[{Ec,Ee},Tx]),
           lists:foreach(fun(SE) ->
-                            lager:error("@ ~p", [SE])
+                            logger:error("@ ~p", [SE])
                         end, S),
           throw('cant_calculate_fee')
   end;
@@ -970,10 +946,6 @@ hashdiff(_) ->
 
 mine_sha512(Body, Nonce, Diff) ->
   DS=Body#{pow=>Nonce},
-%  if Nonce rem 1000000 == 0 ->
-%       io:format("nonce ~w~n",[Nonce]);
-%     true -> ok
-%  end,
   Hash=crypto:hash(sha512,pack_body(DS)),
   Act=if Diff rem 8 == 0 ->
            <<Act1:Diff/big,_/binary>>=Hash,
@@ -984,7 +956,6 @@ mine_sha512(Body, Nonce, Diff) ->
            Act1
       end,
   if Act==0 ->
-       %io:format("Mined nonce ~w~n",[Nonce]),
        DS;
      true ->
        mine_sha512(Body,Nonce+1,Diff)

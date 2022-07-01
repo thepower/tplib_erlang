@@ -78,7 +78,7 @@ prepack(Block) ->
             end, Blocks)
          );
        (outbound, Txp) ->
-        lager:notice("FIXME: save outbound flag in tx"),
+        logger:notice("FIXME: save outbound flag in tx"),
         lists:map(
           fun({TxID, Cid}) ->
               [TxID, Cid]
@@ -99,7 +99,7 @@ prepack(Block) ->
           end, ED
          );
        (extdata, ED) ->
-        lager:notice("TODO: there is maps here sometimes. Find out problem in unpacker ~p",[ED]),
+        logger:notice("TODO: there is maps here sometimes. Find out problem in unpacker ~p",[ED]),
         lists:map(
           fun({Key, Val}) ->
               [Key, Val]
@@ -305,12 +305,9 @@ verify(#{ header:=#{parent:=Parent, %blkv2
         BalsMT=gb_merkle_trees:from_list(BalsBin),
         NewHash=gb_merkle_trees:root_hash(BalsMT),
         if (NewHash =/= Hash) ->
-             io:format("bal root mismatch~n"),
-             lager:notice("bal root mismatch");
+             logger:notice("bal root mismatch");
           true -> ok
         end,
-        %io:format("BR1 ~p~n",[Hash]),
-        %io:format("BR2 ~p~n",[NewHash]),
         {balroot, NewHash};
       ({setroot, Hash}) ->
         Settings=maps:get(settings, Blk, []),
@@ -318,8 +315,7 @@ verify(#{ header:=#{parent:=Parent, %blkv2
         SettingsMT=gb_merkle_trees:from_list(BSettings),
         NewHash=gb_merkle_trees:root_hash(SettingsMT),
         if (NewHash =/= Hash) ->
-             io:format("set root mismatch~n"),
-             lager:notice("set root mismatch");
+             logger:notice("set root mismatch");
            true -> ok
         end,
         {setroot, NewHash};
@@ -329,8 +325,7 @@ verify(#{ header:=#{parent:=Parent, %blkv2
         TxMT=gb_merkle_trees:from_list(BTxs),
         NewHash=gb_merkle_trees:root_hash(TxMT),
         if (NewHash =/= Hash) ->
-             io:format("etxs root mismatch~n"),
-             lager:notice("etxs root mismatch");
+             logger:notice("etxs root mismatch");
           true -> ok
         end,
         {etxroot, NewHash};
@@ -340,8 +335,7 @@ verify(#{ header:=#{parent:=Parent, %blkv2
         TxMT=gb_merkle_trees:from_list(BTxs),
         NewHash=gb_merkle_trees:root_hash(TxMT),
         if (NewHash =/= Hash) ->
-             io:format("txs root mismatch~n"),
-             lager:notice("txs root mismatch");
+             logger:notice("txs root mismatch");
           true -> ok
         end,
         {txroot, NewHash};
@@ -354,8 +348,7 @@ verify(#{ header:=#{parent:=Parent, %blkv2
                      gb_merkle_trees:root_hash(FailMT)
                  end,
         if (NewHash =/= Hash) ->
-             io:format("failed root mismatch~n"),
-             lager:notice("failed root mismatch");
+             logger:notice("failed root mismatch");
            true -> ok
         end,
         {failed, NewHash};
@@ -368,19 +361,15 @@ verify(#{ header:=#{parent:=Parent, %blkv2
       ({entropy, IsTmp}) ->
         {entropy, IsTmp};
       ({Key, Value}) ->
-        lager:notice("Unknown root ~p",[Key]),
+        logger:notice("Unknown root ~p",[Key]),
         {Key, Value}
     end, Roots0),
 
   {BHeader, #{roots:=_NewRoots}}=build_header2(Roots, Parent, H, Chain),
-  %io:format("HI ~p~n", [Roots0]),
-  %io:format("vHI ~p~n", [_NewRoots]),
 
   Hash=crypto:hash(sha256, BHeader),
-  %io:format("H1 ~s ~nH2 ~s~n~n", [hex:encode(Hash),
-  %                             hex:encode(HdrHash)]),
   if Hash =/= HdrHash ->
-       lager:notice("Block hash mismatch"),
+       logger:notice("Block hash mismatch"),
        false;
      true ->
        case lists:keyfind(checksig,1,Opts) of
@@ -447,33 +436,31 @@ verify(#{ header:=#{parent:=Parent, %blkv1
   {BHeader, _Hdr}=build_header(HeaderItems, Parent, H),
 
   Hash=crypto:hash(sha256, BHeader),
-  %io:format("H1 ~s ~nH2 ~s~n~n", [hex:encode(Hash),
-  %                             hex:encode(HdrHash)]),
   if Hash =/= HdrHash ->
        HSetRoot=maps:get(setroot, Header, undefined),
        HTxRoot=maps:get(txroot, Header, undefined),
        HBalsRoot=maps:get(balroot, Header, undefined),
 
        if TxRoot =/= HTxRoot ->
-            lager:notice("TX root mismatch ~s vs ~s",
+            logger:notice("TX root mismatch ~s vs ~s",
                          [
                           hex:encode(TxRoot),
                           hex:encode(HTxRoot)
                          ]);
           SetRoot =/= HSetRoot ->
-            lager:notice("Set root mismatch ~s vs ~s",
+            logger:notice("Set root mismatch ~s vs ~s",
                          [
                           hex:encode(SetRoot),
                           hex:encode(HSetRoot)
                          ]);
           BalsRoot =/= HBalsRoot ->
-            lager:notice("Bals root mismatch ~s vs ~s",
+            logger:notice("Bals root mismatch ~s vs ~s",
                          [
                           hex:encode(BalsRoot),
                           hex:encode(HBalsRoot)
                          ]);
           true ->
-            lager:notice("Something mismatch ~p ~p",[Header,HeaderItems])
+            logger:notice("Something mismatch ~p ~p",[Header,HeaderItems])
        end,
        false;
      true ->
@@ -553,15 +540,12 @@ mkblock2(#{ txs:=Txs, parent:=Parent,
                  []
              end,
 
-  lager:info("ER ~p",[ExtraRoots]),
   TempRoot=if TempID == false -> ExtraRoots;
               true -> [{tmp, <<TempID:64/big>>}|ExtraRoots]
            end,
 
   Failed=prepare_fail(maps:get(failed, Req,[])),
-  %io:format("Fail1 ~p~n",[Failed]),
   FTxs=binarizefail(Failed),
-  %io:format("Fail2 ~p~n",[FTxs]),
   FailRoot=if FTxs==[] ->
                 TempRoot;
               true ->
@@ -623,76 +607,6 @@ mkblock2(#{ txs:=Txs, parent:=Parent,
   end,
   Block4=maps:put(failed, Failed, Block3),
   maps:put(etxs,ETxsl, Block4).
-
-
-%mkblock(#{ txs:=Txs, parent:=Parent, height:=H, bals:=Bals, settings:=Settings }=Req) ->
-%  LH=maps:get(ledger_hash, Req, undefined),
-%  Txsl=lists:keysort(1, lists:usort(Txs)),
-%  BTxs=binarizetx(Txsl),
-%  TxMT=gb_merkle_trees:from_list(BTxs),
-%  BalsBin=bals2bin(Bals),
-%  BalsMT=gb_merkle_trees:from_list(BalsBin),
-%  BSettings=binarize_settings(Settings),
-%  SettingsMT=gb_merkle_trees:from_list(BSettings),
-%
-%  TxRoot=gb_merkle_trees:root_hash(TxMT),
-%  BalsRoot=gb_merkle_trees:root_hash(BalsMT),
-%  SettingsRoot=gb_merkle_trees:root_hash(SettingsMT),
-%
-%  HeaderItems=[{txroot, TxRoot},
-%               {balroot, BalsRoot},
-%               {ledger_hash, LH},
-%               {setroot, SettingsRoot}|
-%               case maps:is_key(mychain, Req) of
-%                 false -> [];
-%                 true ->
-%                   [{chain, maps:get(mychain, Req)}]
-%               end],
-%  {BHeader, Hdr}=build_header(HeaderItems, Parent, H),
-%  %lager:info("HI ~p", [Hdr]),
-%
-%  Block=#{header=>Hdr,
-%          hash=>crypto:hash(sha256, BHeader),
-%          txs=>Txsl,
-%          bals=>Bals,
-%          settings=>Settings,
-%          sign=>[] },
-%  Block1=case maps:get(tx_proof, Req, []) of
-%           [] ->
-%             Block;
-%           List ->
-%             Proof=lists:map(
-%                     fun(TxID) ->
-%                         {TxID, gb_merkle_trees:merkle_proof (TxID, TxMT)}
-%                     end, List),
-%             maps:put(tx_proof, Proof, Block)
-%         end,
-%  Block2=case maps:get(inbound_blocks, Req, []) of
-%           [] ->
-%             Block1;
-%           List2 ->
-%             maps:put(inbound_blocks,
-%                      lists:map(
-%                        fun({InBlId, InBlk}) ->
-%                            {InBlId, maps:remove(txs, InBlk)}
-%                        end, List2),
-%                      Block1)
-%         end,
-%  case maps:get(extdata, Req, []) of
-%    [] ->
-%      Block2;
-%    List3 ->
-%      maps:put(extdata, List3, Block2)
-%  end;
-%
-%mkblock(Blk) ->
-%  case maps:is_key(settings, Blk) of
-%    false ->
-%      mkblock(maps:put(settings, [], Blk));
-%    true ->
-%      io:format("s ~p~n", [maps:keys(Blk)]),
-%      throw(badmatch)
-%  end.
 
 outward_mk(Block) ->
   outward(maps:get(outbound, Block, []), Block, #{}).
@@ -819,7 +733,6 @@ binarizefail(Fail) ->
         BTx=tx:pack(Tx,[withext]),
         {TxID, BTx};
        ({TxID, #{<<"reason">>:=_}=Any}) ->
-        %io:format("Binarize ~p~n",[Any]),
         BTx=msgpack:pack(Any,[{spec,new},{pack_str,from_list}]),
         {TxID, BTx}
     end, Fail).
