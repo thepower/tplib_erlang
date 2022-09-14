@@ -10,7 +10,7 @@
 -export([complete_tx/2]).
 -export([hashdiff/1,upgrade/1]).
 
--include("apps/tpnode/include/tx_const.hrl").
+-include("include/tx_const.hrl").
 
 mergesig(#{sig:=S1}=Tx1, #{sig:=S2}) when is_map(S1), is_map(S2)->
   Tx1#{sig=>
