@@ -368,7 +368,7 @@ rawkey(Key) ->
                       algorithm=A %{1,2,840,10045,2,1}
                      },
        subjectPublicKey = PubKey } = public_key:der_decode('SubjectPublicKeyInfo', Key),
-    {pkalgo(A), PubKey}
+    {pub, pkalgo(A), PubKey}
   end.
 
 
