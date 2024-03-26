@@ -1,27 +1,30 @@
 -module(settings).
+-include("include/tplog.hrl").
 
--export([new/0, set/3, patch/2, mp/1, dmp/1, get/2]).
--export([sign/2, verify/1, verify/2, get_patches/1, get_patches/2]).
+-export([new/0, set/3, patch/2, mp/1, dmp/1, get/2, get/3]).
+-export([get_patches/1, get_patches/2]).
+-export([verify/1]).
+-export([upgrade/1]).
 -export([make_meta/2, clean_meta/1]).
 
-sign(Patch, PrivKey) when is_list(Patch) ->
-    BinPatch=mp(Patch),
-    sign(#{patch=>BinPatch, sig=>[]}, PrivKey);
-sign(Patch, PrivKey) when is_binary(Patch) ->
-    sign(#{patch=>Patch, sig=>[]}, PrivKey);
-
-sign(#{patch:=LPatch}=Patch, PrivKey) ->
-    BPatch=if is_list(LPatch) -> mp(LPatch);
-                is_binary(LPatch) -> LPatch
-             end,
-    Sig=bsig:signhash(
-          crypto:hash(sha256, BPatch),
-          [{timestamp, os:system_time(millisecond)}],
-          PrivKey),
-    #{ patch=>BPatch,
-        sig => [Sig|maps:get(sig, Patch, [])]
-     }.
-
+%sign(Patch, PrivKey) when is_list(Patch) ->
+%    BinPatch=mp(Patch),
+%    sign(#{patch=>BinPatch, sig=>[]}, PrivKey);
+%sign(Patch, PrivKey) when is_binary(Patch) ->
+%    sign(#{patch=>Patch, sig=>[]}, PrivKey);
+%
+%sign(#{patch:=LPatch}=Patch, PrivKey) ->
+%    BPatch=if is_list(LPatch) -> mp(LPatch);
+%                is_binary(LPatch) -> LPatch
+%             end,
+%    Sig=bsig:signhash(
+%          crypto:hash(sha256, BPatch),
+%          [{timestamp, os:system_time(millisecond)}],
+%          PrivKey),
+%    #{ patch=>BPatch,
+%        sig => [Sig|maps:get(sig, Patch, [])]
+%     }.
+%
 verify(#{patch:=LPatch, sig:=HSig}=Patch, VerFun) ->
   BinPatch=if is_list(LPatch) -> mp(LPatch);
               is_binary(LPatch) -> LPatch
@@ -130,26 +133,40 @@ make_meta(Patches, MetaInfo) ->
         [#{<<"t">>=><<"set">>, <<"p">>=>Key, <<"v">>=>Val}|Acc]
     end, [], Map).
 
+get([], M, _D) -> M;
+get([Hd], M, D) when is_atom(Hd) ->
+  case maps:is_key(Hd, M) of
+    true ->
+      maps:get(Hd, M, D);
+    false ->
+      maps:get(atom_to_binary(Hd,utf8), M, D)
+  end;
+get([Hd], M, D) ->
+    maps:get(Hd, M, D);
+get([Hd|Path], M, D) when is_list(Path) ->
+    H1=maps:get(Hd, M, #{}),
+    get(Path, H1, D).
+
 
 get([], M) -> M;
 get([Hd|Path], M) when is_list(Path) ->
     H1=maps:get(Hd, M, #{}),
     get(Path, H1).
 
-change(Action, [Element|Path], Value, M, FPath) when
-      Element==<<"chain">> orelse
-      Element==<<"chains">> orelse
-      Element==<<"nodechain">> orelse
-      Element==<<"keys">> orelse
-      Element==<<"globals">> orelse
-      Element==<<"patchsig">> orelse
-      Element==<<"blocktime">> orelse
-      Element==<<"minsig">> orelse
-      Element==<<"enable">> orelse
-      Element==<<"params">> orelse
-      Element==<<"disable">> orelse
-      Element==<<"nodes">> ->
-    change(Action, [binary_to_atom(Element, utf8)|Path], Value, M, FPath);
+%change(Action, [Element|Path], Value, M, FPath) when
+%      Element==<<"chain">> orelse
+%      Element==<<"chains">> orelse
+%      Element==<<"nodechain">> orelse
+%      Element==<<"keys">> orelse
+%      Element==<<"globals">> orelse
+%      Element==<<"patchsig">> orelse
+%      Element==<<"blocktime">> orelse
+%      Element==<<"minsig">> orelse
+%      Element==<<"enable">> orelse
+%      Element==<<"params">> orelse
+%      Element==<<"disable">> orelse
+%      Element==<<"nodes">> ->
+%    change(Action, [binary_to_atom(Element, utf8)|Path], Value, M, FPath);
 
 change(lcleanup, [], <<"empty_list">>, Map, FPath) ->
   if(is_map(Map)) ->
@@ -248,10 +265,38 @@ change(delete, [Path], Value, M, FPath) -> %compare and delete
     end;
 
 
+change(set, [Path], Value, M, FPath) when is_atom(Path) -> %set or replace
+    if not is_map(M) ->
+         throw({'non_map', FPath});
+       true ->
+         ok
+    end,
+    BPath=atom_to_binary(Path, utf8),
+    {OType, PrevValue}=case maps:is_key(Path, M) of
+                          true ->
+                            {atom, maps:get(Path, M)};
+                          false ->
+                            case maps:is_key(BPath, M) of
+                              true -> {binary, maps:get(BPath, M)};
+                              false -> {none, undefined}
+                            end
+                        end,
+    if is_list(PrevValue) orelse is_map(PrevValue) ->
+         io:format("change(set,[~p],~p,~p,~p)~n",[Path,Value,M,FPath]),
+         throw({'non_value', FPath});
+       true andalso OType==atom ->
+         maps:put(BPath, Value,
+                  maps:remove(Path, M)
+                 );
+       true ->
+         maps:put(BPath, Value, M)
+    end;
+
 change(set, [Path], Value, M, FPath) -> %set or replace
     if is_map(M) ->
            PrevValue=maps:get(Path, M, undefined),
            if is_list(PrevValue) orelse is_map(PrevValue) ->
+                io:format("change(set,[~p],~p,~p,~p)~n",[Path,Value,M,FPath]),
                   throw({'non_value', FPath});
               true ->
                   maps:put(Path, Value, M)
@@ -274,16 +319,22 @@ patch1([#{<<"t">>:=Action, <<"p">>:=K, <<"v">>:=V}|Settings], M) ->
     patch1(Settings, M1).
 
 %txv2
-patch({_TxID, #{patches:=Patch, sig:=Sigs}}, M) ->
-    patch(#{patch=>Patch, sig=>Sigs}, M);
+patch(#{patches:=Patch, sig:=_Sigs}, M) ->
+    patch1(Patch, M);
+
+%txv2
+patch({_TxID, #{patches:=Patch, sig:=_Sigs}}, M) ->
+    patch1(Patch, M);
 
 %tvx1
-patch({_TxID, #{patch:=Patch, sig:=Sigs}}, M) ->
-    patch(#{patch=>Patch, sig=>Sigs}, M);
+patch({_TxID, #{patch:=Patch, sig:=Sigs}}=E, M) ->
+  ?LOG_NOTICE("deprecated v1 patch ~p", [E]),
+  patch(#{patch=>Patch, sig=>Sigs}, M);
 
 %txv1
-patch(#{patch:=Patch}, M) ->
-    patch(Patch, M);
+patch(#{patch:=Patch}=E, M) ->
+  ?LOG_NOTICE("deprecated v1 patch ~p", [E]),
+  patch(Patch, M);
 
 %naked
 patch(Changes, M) when is_list(Changes) ->
@@ -293,6 +344,44 @@ patch(Changes, M) when is_list(Changes) ->
 patch(MP, M) when is_binary(MP) ->
     DMP=dmp(MP),
     patch1(DMP, M).
+
+upgrade(true) -> true;
+upgrade(false) -> false;
+upgrade(Term) when is_binary(Term) ->
+  Term;
+upgrade(Term) when is_list(Term) ->
+  Term;
+upgrade(Term) when is_integer(Term) ->
+  Term;
+
+upgrade(Term) when is_map(Term) ->
+  maps:fold(
+    fun(Element,V,Acc) when
+      Element==chain orelse
+      Element==chains orelse
+      Element==nodechain orelse
+      Element==keys orelse
+      Element==globals orelse
+      Element==patchsig orelse
+      Element==blocktime orelse
+      Element==minsig orelse
+      Element==enable orelse
+      Element==params orelse
+      Element==disable orelse
+      Element==nodes ->
+        maps:put(atom_to_binary(Element, utf8), upgrade(V), Acc);
+       (Element, _V, _Acc) when is_atom(Element) ->
+        try
+          throw(bad)
+        catch throw:bad:S ->
+                logger:error("Found atom ~p in settings at ~p", [Element, S]),
+                throw({'bad_atom',Element})
+        end;
+       (Element, V, Acc) when is_integer(Element) ->
+        maps:put(Element, upgrade(V), Acc);
+       (Element, V, Acc) when is_binary(Element) ->
+        maps:put(Element, upgrade(V), Acc)
+    end, #{}, Term).
 
 dmp(Term) when is_binary(Term) ->
     {ok, T}=msgpack:unpack(Term, [
