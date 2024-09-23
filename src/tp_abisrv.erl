@@ -13,7 +13,7 @@
 %% API Function Exports
 %% ------------------------------------------------------------------
 
--export([start_link/0,find_all/0,get/1,known/0]).
+-export([start_link/1,find_all/1,get/1,known/0]).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Exports
@@ -26,8 +26,8 @@
 %% API Function Definitions
 %% ------------------------------------------------------------------
 
-start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+start_link(Path) ->
+    gen_server:start_link({local, ?SERVER}, ?MODULE, [Path], []).
 
 get(Addr) ->
   gen_server:call(?SERVER, {get, Addr}).
@@ -35,8 +35,8 @@ get(Addr) ->
 known() ->
   gen_server:call(?SERVER, known).
 
-find_all() ->
-  ABIs= filelib:wildcard(filename:join(code:priv_dir(tpns),"*.abi")),
+find_all(Path) ->
+  ABIs= filelib:wildcard(filename:join(Path,"*.abi")),
   lists:filtermap(
     fun(N) ->
         case string:split((filename:basename(N)),".") of
@@ -56,9 +56,9 @@ find_all() ->
 %% gen_server Function Definitions
 %% ------------------------------------------------------------------
 
-init(_Args) ->
+init(Path) ->
   self() ! load_abi,
-  {ok, #{abi=>#{}}}.
+  {ok, #{abi=>#{},path=>Path}}.
 
 handle_call({get,Addr}, _From, #{abi:=ABIs}=State) ->
   case maps:get(Addr,ABIs,undefined) of
@@ -88,8 +88,8 @@ handle_cast(_Msg, State) ->
   logger:notice("Unknown cast ~p",[_Msg]),
   {noreply, State}.
 
-handle_info(load_abi, State) ->
-  {noreply, State#{abi=>maps:from_list(tp_abisrv:find_all())}};
+handle_info(load_abi, #{path:=Path}=State) ->
+  {noreply, State#{abi=>maps:from_list(tp_abisrv:find_all(Path))}};
 
 handle_info(_Info, State) ->
   logger:notice("Unknown info  ~p",[_Info]),
