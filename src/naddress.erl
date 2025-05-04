@@ -54,6 +54,7 @@ parse(Int) when is_integer(Int) andalso Int >= 9223372036854775808
     end.
 
 %% encode address to human frendly format
+encode(<<_:160/big>>=X) -> hex:encodex(X);
 encode(<<X:64/big>>) -> encode(X);
 encode(Int) when is_integer(Int) andalso Int >= 9223372036854775808
                  andalso Int < 13835058055282163712 ->
@@ -93,6 +94,10 @@ check(UserAddr) ->
     end.
 %% decode address from human-frendly format to int and check checksum
 
+decode("0x"++HEX) when length(HEX)==16 ->
+    hex:decode(HEX);
+decode(<<"0x",HEX:16/binary>>) ->
+    hex:decode(HEX);
 decode(UserAddr) ->
     C=cleanup(UserAddr),
     case size(C) of
