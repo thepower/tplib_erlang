@@ -11,6 +11,7 @@
 -export([outward_chain/2, outward_ptrs/2]).
 -export([pack_mproof/1, unpack_mproof/1]).
 -export([ledger_hash/1]).
+-export([downgrade/1, downgrade_txs/2, downgrade_bals/1, patch2bal/2]).
 
 -export([bals2bin/1]).
 -export([minify/1]).
@@ -68,7 +69,7 @@ prepack(Block) ->
         maps:from_list(
           lists:map(
             fun({TxID, T}) ->
-                {TxID, tx:pack(T)}
+                {TxID, pack_patch(T)}
             end, Txs)
          );
        (inbound_blocks, Blocks) ->
@@ -79,7 +80,6 @@ prepack(Block) ->
             end, Blocks)
          );
        (outbound, Txp) ->
-        ?LOG_NOTICE("FIXME: save outbound flag in tx"),
         lists:map(
           fun({TxID, Cid}) ->
               [TxID, Cid]
@@ -100,7 +100,6 @@ prepack(Block) ->
           end, ED
          );
        (extdata, ED) ->
-        ?LOG_NOTICE("TODO: there is maps here sometimes. Find out problem in unpacker ~p",[ED]),
         lists:map(
           fun({Key, Val}) ->
               [Key, Val]
@@ -149,9 +148,24 @@ unpack(Block) when is_binary(Block) ->
          balroot, ledger_hash, height, parent, txroot, tx_proof,
          amount, lastblk, seq, t, child, setroot, tmp, ver,
          inbound_blocks, chain, extdata, roots, failed,
-         mean_time, entropy, etxroot],
+		 receipt, mean_time, entropy, etxroot, ledger_patch],
   case msgpack:unpack(Block, [{known_atoms, Atoms}]) of
-    {ok, DMP} ->
+    {ok, DMP0} ->
+	  DMP=case DMP0 of
+			#{receipt:=_} -> %new block, avoid atoms decoding
+			  {ok,D2}=msgpack:unpack(Block, []),
+			  maps:fold(
+				fun(<<"ledger_patch">>,R,A) ->
+					maps:put(ledger_patch,R,A);
+				   (<<"receipt">>,R,A) ->
+					maps:put(receipt,R,A);
+				   (_,_,A) -> A
+				end, DMP0, D2);
+			_ -> %old block
+			  DMP0
+		  end,
+
+
       ConvertFun=fun (header, #{roots:=RootsList}=Header) ->
                      Header#{
                        roots=>[ {RK,RV} || [RK,RV] <- RootsList ]
@@ -353,6 +367,13 @@ verify(#{ header:=#{parent:=Parent, %blkv2
            true -> ok
         end,
         {failed, NewHash};
+	  ({<<"receipt_root">>,Hash}) ->
+		NewHash=receipt_hash(maps:get(receipt, Blk, [])),
+		if (NewHash =/= Hash) ->
+			 ?LOG_NOTICE("receipt root mismatch");
+		   true -> ok
+		end,
+		{receipt_root, NewHash};
       ({ledger_hash, Hash}) ->
         {ledger_hash, Hash};
       ({tmp, IsTmp}) ->
@@ -365,6 +386,12 @@ verify(#{ header:=#{parent:=Parent, %blkv2
         {settings_hash, SH};
       ({<<"settings_hash">>, SH}) ->
         {settings_hash, SH};
+      ({<<"log_hash">>, SH}) ->
+        {log_hash, SH};
+      ({<<"ledger_patch_root">>, _SH}=E) ->
+        E;
+      ({<<"cumulative_gas">>, _SH}=E) ->
+        E;
       ({Key, Value}) ->
         ?LOG_INFO("Unknown root ~p",[Key]),
         {Key, Value}
@@ -449,20 +476,20 @@ verify(#{ header:=#{parent:=Parent, %blkv1
        if TxRoot =/= HTxRoot ->
             ?LOG_NOTICE("TX root mismatch ~s vs ~s",
                          [
-                          bin2hex:dbin2hex(TxRoot),
-                          bin2hex:dbin2hex(HTxRoot)
+                          hex:encode(TxRoot),
+                          hex:encode(HTxRoot)
                          ]);
           SetRoot =/= HSetRoot ->
             ?LOG_NOTICE("Set root mismatch ~s vs ~s",
                          [
-                          bin2hex:dbin2hex(SetRoot),
-                          bin2hex:dbin2hex(HSetRoot)
+                          hex:encode(SetRoot),
+                          hex:encode(HSetRoot)
                          ]);
           BalsRoot =/= HBalsRoot ->
             ?LOG_NOTICE("Bals root mismatch ~s vs ~s",
                          [
-                          bin2hex:dbin2hex(BalsRoot),
-                          bin2hex:dbin2hex(HBalsRoot)
+                          hex:encode(BalsRoot),
+                          hex:encode(HBalsRoot)
                          ]);
           true ->
             ?LOG_NOTICE("Something mismatch ~p ~p",[Header,HeaderItems])
@@ -494,24 +521,59 @@ verify(#{ header:=#{parent:=_,
 
 
 binarize_settings([]) -> [];
-binarize_settings([{TxID, #{ kind:=patch, ver:=2, patches:=_ }=Patch}|Rest]) ->
-  [{TxID, tx:pack(Patch)}|binarize_settings(Rest)];
-binarize_settings([{TxID, #{ patch:=_LPatch }=Patch}|Rest]) ->
-  [{TxID, tx:pack(Patch)}|binarize_settings(Rest)].
+binarize_settings([{TxID, Patch}|Rest]) ->
+  [{TxID, pack_patch(Patch)}|binarize_settings(Rest)].
+
+pack_patch(#{ patch:=_LPatch }=OldTX) ->
+  tx:pack(OldTX);
+%  tx:pack(tx:construct_tx(#{patches=>P, kind=>patch, ver=>2}));
+
+pack_patch(#{ kind:=patch, ver:=2, patches:=_, body:=_ }=Patch) ->
+  tx:pack(Patch);
+pack_patch(#{ kind:=patch, ver:=2, patches:=_ }=Patch) ->
+  tx:pack(tx:construct_tx(Patch)).
+
+prepare_ledger_patch(Data) ->
+  prepare_ledger_patch(Data, [], crypto:hash_init(sha256)).
+
+prepare_ledger_patch([], Acc, Hash) ->
+  {lists:reverse(Acc), crypto:hash_final(Hash)};
+
+prepare_ledger_patch([{Address,Field,Key,OldVal,NewVal}|Rest],Acc,Hash) ->
+  case mledger:field_to_id(Field) of
+	0 ->
+	  throw({'unknown_ledger_field',Field});
+	N
+	->
+	  Acc1 = [[Address,N,Key,OldVal,NewVal]|Acc],
+	  Hash1 = crypto:hash_update(Hash, [Address,
+										<<N:16/big>>,
+										Key,
+										data2hash(OldVal),
+										data2hash(NewVal)
+									   ]),
+	  prepare_ledger_patch(Rest, Acc1, Hash1 )
+  end.
+
+%data2hash(false) -> <<0>>;
+%data2hash(true) -> <<1>>;
+data2hash(undefined) -> <<>>;
+data2hash(Val) when is_binary(Val) -> Val;
+data2hash(Val) when is_integer(Val) -> binary:encode_unsigned(Val);
+data2hash(List) when is_list(List) ->
+  [ data2hash(Vi) || Vi <- List].
 
 
 mkblock2(#{ txs:=Txs, parent:=Parent,
-            height:=H, bals:=Bals0,
+            height:=H,
             settings:=Settings,
             mychain:=Chain
           }=Req) ->
+
   TempID=case maps:get(temporary, Req, false) of
            X when is_integer(X) -> X;
            _ -> false
          end,
-  Bals=if TempID==false -> Bals0;
-          true -> #{} %avoid calculating bals_root on temporary block
-       end,
   LH=maps:get(ledger_hash, Req, undefined),
 
   ETxsl=lists:keysort(1, lists:usort(maps:get(etxs, Req, []))),
@@ -530,9 +592,22 @@ mkblock2(#{ txs:=Txs, parent:=Parent,
   TxMT=gb_merkle_trees:from_list(BTxs),
   TxRoot=gb_merkle_trees:root_hash(TxMT),
 
-  BalsBin=bals2bin(Bals),
-  BalsMT=gb_merkle_trees:from_list(BalsBin),
-  BalsRoot=gb_merkle_trees:root_hash(BalsMT),
+
+  {BalRoot,BlockBal}
+  = case Req of
+	  #{bals:=Bals} when TempID==false ->
+		BalsBin=bals2bin(Bals),
+		BalsMT=gb_merkle_trees:from_list(BalsBin),
+		BalsRoot=gb_merkle_trees:root_hash(BalsMT),
+		{ [{balroot, BalsRoot}], #{bals=>Bals} };
+	  #{bals:=_} when is_integer(TempID) ->
+		%avoid calculating bals_root on temporary block
+		{ [],#{}};
+	  #{ledger_patch:=LP0} ->
+		{LP,PatchHash}=prepare_ledger_patch(LP0),
+		{ [{ledger_patch_root, PatchHash}], #{ledger_patch=>LP}}
+	end,
+
 
   BSettings=binarize_settings(Settings),
   SettingsMT=gb_merkle_trees:from_list(BSettings),
@@ -545,7 +620,7 @@ mkblock2(#{ txs:=Txs, parent:=Parent,
                  []
              end,
 
-  ?LOG_INFO("ER ~p",[ExtraRoots]),
+  ?LOG_DEBUG("ExtraRoots ~p",[ExtraRoots]),
   TempRoot=if TempID == false -> ExtraRoots;
               true -> [{tmp, <<TempID:64/big>>}|ExtraRoots]
            end,
@@ -559,12 +634,22 @@ mkblock2(#{ txs:=Txs, parent:=Parent,
                 [{failed,gb_merkle_trees:root_hash(FailMT)}|TempRoot]
            end,
 
-  HeaderItems0=[{txroot, TxRoot},
+  RecieptRoot=case maps:get(receipt, Req, undefined) of
+				undefined ->
+				  [];
+				[] -> [];
+				L when is_list(L) ->
+				  Hash=receipt_hash(L),
+				  [{receipt_root, Hash}]
+			  end,
+
+  TailRoots=FailRoot++RecieptRoot,
+
+  HeaderItems0=BalRoot++[{txroot, TxRoot},
                 {etxroot, ETxRoot},
-                {balroot, BalsRoot},
                 {ledger_hash, LH},
                 {setroot, SettingsRoot}
-                |FailRoot],
+                |TailRoots],
   HeaderItems =
     case maps:get(settings_hash, Req, unknown) of
       unknown ->
@@ -574,12 +659,13 @@ mkblock2(#{ txs:=Txs, parent:=Parent,
     end,
   {BHeader, Hdr}=build_header2(HeaderItems, Parent, H, Chain),
 
-  Block=#{header=>Hdr,
-          hash=>crypto:hash(sha256, BHeader),
-          txs=>Txsl,
-          bals=>Bals,
-          settings=>Settings,
-          sign=>[] },
+  Block=maps:merge(
+		  BlockBal,
+		  #{header=>Hdr,
+			hash=>crypto:hash(sha256, BHeader),
+			txs=>Txsl,
+			settings=>Settings,
+			sign=>[] }),
   Block0=if TempID == false -> Block;
             true ->
               Block#{temporary=>TempID}
@@ -612,7 +698,82 @@ mkblock2(#{ txs:=Txs, parent:=Parent,
       maps:put(extdata, List3, Block2)
   end,
   Block4=maps:put(failed, Failed, Block3),
-  maps:put(etxs,ETxsl, Block4).
+
+  Block5=maps:put(etxs,ETxsl, Block4),
+  case maps:get(receipt, Req, undefined) of
+	  undefined ->
+		  Block5;
+	  Lr when is_list(Lr) ->
+		  maps:put(receipt, Lr, Block5)
+  end.
+
+%mkblock(#{ txs:=Txs, parent:=Parent, height:=H, bals:=Bals, settings:=Settings }=Req) ->
+%  LH=maps:get(ledger_hash, Req, undefined),
+%  Txsl=lists:keysort(1, lists:usort(Txs)),
+%  BTxs=binarizetx(Txsl),
+%  TxMT=gb_merkle_trees:from_list(BTxs),
+%  BalsBin=bals2bin(Bals),
+%  BalsMT=gb_merkle_trees:from_list(BalsBin),
+%  BSettings=binarize_settings(Settings),
+%  SettingsMT=gb_merkle_trees:from_list(BSettings),
+%
+%  TxRoot=gb_merkle_trees:root_hash(TxMT),
+%  BalsRoot=gb_merkle_trees:root_hash(BalsMT),
+%  SettingsRoot=gb_merkle_trees:root_hash(SettingsMT),
+%
+%  HeaderItems=[{txroot, TxRoot},
+%               {balroot, BalsRoot},
+%               {ledger_hash, LH},
+%               {setroot, SettingsRoot}|
+%               case maps:is_key(mychain, Req) of
+%                 false -> [];
+%                 true ->
+%                   [{chain, maps:get(mychain, Req)}]
+%               end],
+%  {BHeader, Hdr}=build_header(HeaderItems, Parent, H),
+%  %?LOG_INFO("HI ~p", [Hdr]),
+%
+%  Block=#{header=>Hdr,
+%          hash=>crypto:hash(sha256, BHeader),
+%          txs=>Txsl,
+%          bals=>Bals,
+%          settings=>Settings,
+%          sign=>[] },
+%  Block1=case maps:get(tx_proof, Req, []) of
+%           [] ->
+%             Block;
+%           List ->
+%             Proof=lists:map(
+%                     fun(TxID) ->
+%                         {TxID, gb_merkle_trees:merkle_proof (TxID, TxMT)}
+%                     end, List),
+%             maps:put(tx_proof, Proof, Block)
+%         end,
+%  Block2=case maps:get(inbound_blocks, Req, []) of
+%           [] ->
+%             Block1;
+%           List2 ->
+%             maps:put(inbound_blocks,
+%                      lists:map(
+%                        fun({InBlId, InBlk}) ->
+%                            {InBlId, maps:remove(txs, InBlk)}
+%                        end, List2),
+%                      Block1)
+%         end,
+%  case maps:get(extdata, Req, []) of
+%    [] ->
+%      Block2;
+%    List3 ->
+%      maps:put(extdata, List3, Block2)
+%  end;
+%
+%mkblock(Blk) ->
+%  case maps:is_key(settings, Blk) of
+%    false ->
+%      mkblock(maps:put(settings, [], Blk));
+%    true ->
+%      throw(badmatch)
+%  end.
 
 outward_mk(Block) ->
   outward(maps:get(outbound, Block, []), Block, #{}).
@@ -749,6 +910,9 @@ binarizetx([]) ->
 
 binarizetx([{TxID, Tx}|Rest]) ->
   BTx=tx:pack(Tx,[withext]),
+  %TxIDLen=size(TxID),
+  %TxLen=size(BTx),
+  %<<TxIDLen:8/integer, TxLen:16/integer, TxID/binary, BTx/binary, (binarizetx(Rest))/binary>>.
   [{TxID, BTx}|binarizetx(Rest)].
 
 extract(<<>>) ->
@@ -777,7 +941,7 @@ bals2bin(NewBal) ->
     end, [], L).
 
 blkid(<<X:8/binary, _/binary>>) ->
-  bin2hex:dbin2hex(X).
+  hex:encode(X).
 
 
 sign(Blk, ED, PrivKey) when is_map(Blk) ->
@@ -910,4 +1074,111 @@ glue_packet(List) ->
        ?LOG_ERROR("Received block is broken ~p", [SortedList]),
        throw(broken)
   end.
+
+receipt_hash(L) ->
+  Mapped=lists:map(
+		   fun(Reciept) ->
+			   [ if is_integer(I) ->
+					  binary:encode_unsigned(I);
+					is_binary(I) ->
+					  I;
+					is_list(I) ->
+					  I
+				 end || I <- Reciept ]
+		   end,
+		   L),
+  crypto:hash(sha256, Mapped).
+
+
+downgrade_txs(Txs, Rec) ->
+  TxData=lists:foldl(fun([_Index,TxID,_Hash, Res, Ret | _],A) ->
+				  maps:put(TxID,{Res,Ret},A)
+			  end, #{}, Rec),
+  lists:map(
+	fun({TxID, #{kind:=register}=Tx}) ->
+		case maps:get(TxID, TxData) of
+		  {1, <<NewBAddr:8/binary>>} ->
+			{TxID,tx:set_ext(<<"addr">>,NewBAddr,Tx)};
+		  _ ->
+			{TxID, Tx}
+		end;
+	   ({TxID, #{kind:=generic}=Tx}) ->
+		case maps:get(TxID, TxData) of
+		  {1, <<Int:256/big>>} when Int < 16#10000000000000000 ->
+			{TxID,tx:set_ext(<<"retval">>,Int,Tx)};
+		  {1, RetVal} when is_binary(RetVal) ->
+			{TxID,tx:set_ext(<<"retval">>,RetVal,Tx)};
+		  {0, <<16#08C379A0:32/big,
+				16#20:256/big,
+				Len:256/big,
+				Str:Len/binary,_/binary>>} ->
+			{TxID,tx:set_ext(<<"revert">>,Str,Tx)};
+		  {0, Reason} ->
+			{TxID,tx:set_ext(<<"revert">>,Reason,Tx)};
+		  _ ->
+			{TxID, Tx}
+		end;
+	   ({TxID, #{kind:=deploy}=Tx}) ->
+		case maps:get(TxID, TxData) of
+		  {1, Address} when size(Address)==8; size(Address)==20 ->
+			{TxID,tx:set_ext(<<"addr">>,Address,Tx)};
+		  {0, Reason} ->
+			{TxID,tx:set_ext(<<"revert">>,Reason,Tx)};
+		  _ ->
+			{TxID, Tx}
+		end;
+	   ({TxID, Any}) ->
+		{TxID, Any}
+	end,
+	Txs).
+
+downgrade_bals(LedgerPatch) ->
+  patch2bal(LedgerPatch,#{}).
+
+downgrade(#{bals:=_}=Block) ->
+  Block; %no downgrade required
+
+downgrade(#{ledger_patch:=LP,receipt:=Rec,txs:=Txs}=Block) ->
+  Block#{bals=>downgrade_bals(LP), txs=>downgrade_txs(Txs, Rec)}.
+
+patch2bal([], Map) ->
+  maps:map(
+	fun(_,B=#{changes:=L}) ->
+		B#{changes=>lists:usort(L)};
+	   (_,B) ->
+		B
+	end,
+	Map);
+patch2bal([[Address,FieldId,Path,OldValue,NewValue]|Rest], Map) when is_integer(FieldId) ->
+  patch2bal([{Address,mledger:id_to_field(FieldId),Path,OldValue,NewValue}|Rest], Map);
+
+patch2bal([{Address,Field,[],_OldValue,NewValue}|Rest], Map) when
+	  Field == seq;
+	  Field == t;
+	  Field == pubkey;
+	  Field == code ->
+	ABal=maps:get(Address, Map, mbal:new()),
+	ABal1=mbal:put(Field, NewValue, ABal),
+	patch2bal(Rest, maps:put(Address, ABal1, Map));
+
+patch2bal([{Address,Field,Path,_OldValue,NewValue}|Rest], Map) when
+	  Field == lastblk ->
+	ABal=maps:get(Address, Map, mbal:new()),
+	ABal1=mbal:put(Field, Path, NewValue, ABal),
+	patch2bal(Rest, maps:put(Address, ABal1, Map));
+
+patch2bal([{Address,lstore,Path,_OldValue,NewValue}|Rest], Map) ->
+	ABal=maps:get(Address, Map, mbal:new()),
+	ABal1=mbal:put(lstore, Path, NewValue, ABal),
+	patch2bal(Rest, maps:put(Address, ABal1, Map));
+
+patch2bal([{Address,balance,Key,_OldValue,NewValue}|Rest], Map) ->
+	ABal=maps:get(Address, Map, mbal:new()),
+	ABal1=mbal:put(amount, Key, NewValue, ABal),
+	patch2bal(Rest, maps:put(Address, ABal1, Map));
+
+patch2bal([{Address,storage,Key,_OldValue,NewValue}|Rest], Map) ->
+	ABal=maps:get(Address, Map, mbal:new()),
+	ABal1=mbal:put(state, Key, NewValue, ABal),
+	patch2bal(Rest, maps:put(Address, ABal1, Map)).
 
